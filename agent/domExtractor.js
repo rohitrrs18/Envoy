@@ -24,7 +24,6 @@ class DOMExtractor {
           }
         }
         
-        // Tag + text or hierarchy
         const tag = el.tagName.toLowerCase();
         let path = tag;
         let parent = el.parentElement;
@@ -78,7 +77,7 @@ class DOMExtractor {
         });
       });
 
-      return elements.slice(0, 50); // Keep top 50 visible elements
+      return elements.slice(0, 50);
     });
   }
 
@@ -88,8 +87,117 @@ class DOMExtractor {
     return await page.evaluate((hintText) => {
       const results = [];
 
-      // 1. Check for standard tables
-      const tables = document.querySelectorAll('table');
+      // 1. Wikipedia & Encyclopedia Articles (Infobox + Lead Summary)
+      const isWiki = window.location.hostname.includes('wikipedia.org') || document.querySelector('.infobox, #firstHeading, .mw-parser-output');
+      if (isWiki) {
+        const headingEl = document.querySelector('#firstHeading') || document.querySelector('h1');
+        const subjectTitle = headingEl ? headingEl.innerText.trim() : document.title.replace(' - Wikipedia', '');
+
+        // Extract lead paragraphs
+        const paragraphs = Array.from(document.querySelectorAll('.mw-parser-output > p'))
+          .map(p => p.innerText.replace(/\[\d+\]/g, '').trim())
+          .filter(t => t.length > 40);
+
+        if (paragraphs.length > 0) {
+          results.push({
+            Property: 'Summary',
+            Details: paragraphs[0]
+          });
+          if (paragraphs.length > 1) {
+            results.push({
+              Property: 'Key Contributions',
+              Details: paragraphs[1]
+            });
+          }
+        }
+
+        // Extract infobox key-value facts
+        const infobox = document.querySelector('.infobox');
+        if (infobox) {
+          const rows = infobox.querySelectorAll('tr');
+          rows.forEach((r) => {
+            const th = r.querySelector('th');
+            const td = r.querySelector('td');
+            if (th && td) {
+              const key = th.innerText.replace(/\s+/g, ' ').trim();
+              const val = td.innerText.replace(/\[\d+\]/g, '').replace(/\s+/g, ' ').trim();
+              if (key && val && key.length < 40 && val.length > 0) {
+                results.push({
+                  Property: key,
+                  Details: val
+                });
+              }
+            }
+          });
+        }
+
+        // Extract main section highlights
+        const h2s = Array.from(document.querySelectorAll('.mw-parser-output h2 .mw-headline, .mw-parser-output h2'));
+        const keySections = h2s
+          .map(h => h.innerText.replace(/\[edit\]/i, '').trim())
+          .filter(s => s && !['Contents', 'See also', 'References', 'External links', 'Notes', 'Further reading'].includes(s))
+          .slice(0, 5);
+
+        if (keySections.length > 0) {
+          results.push({
+            Property: 'Major Topics',
+            Details: keySections.join(' • ')
+          });
+        }
+
+        if (results.length > 0) {
+          return results;
+        }
+      }
+
+      // 2. Hacker News style list
+      const hnItems = document.querySelectorAll('.athing');
+      if (hnItems.length > 0) {
+        hnItems.forEach((row, idx) => {
+          if (idx >= 15) return;
+          const titleEl = row.querySelector('.titleline > a');
+          const siteEl = row.querySelector('.sitebit');
+          const subtext = row.nextElementSibling ? row.nextElementSibling.querySelector('.subtext') : null;
+          const scoreEl = subtext ? subtext.querySelector('.score') : null;
+          const authorEl = subtext ? subtext.querySelector('.hnuser') : null;
+
+          if (titleEl) {
+            results.push({
+              rank: idx + 1,
+              title: titleEl.innerText.trim(),
+              url: titleEl.href,
+              source: siteEl ? siteEl.innerText.trim() : 'news.ycombinator.com',
+              points: scoreEl ? scoreEl.innerText.trim() : '0 points',
+              author: authorEl ? authorEl.innerText.trim() : 'unknown'
+            });
+          }
+        });
+        if (results.length > 0) return results;
+      }
+
+      // 3. GitHub trending or list rows
+      const repoRows = document.querySelectorAll('article.Box-row');
+      if (repoRows.length > 0) {
+        repoRows.forEach((row, idx) => {
+          if (idx >= 10) return;
+          const titleLink = row.querySelector('h2 a');
+          const descEl = row.querySelector('p');
+          const starsEl = row.querySelector('a[href*="/stargazers"]');
+          if (titleLink) {
+            results.push({
+              rank: idx + 1,
+              name: titleLink.innerText.trim().replace(/\s+/g, ' '),
+              url: titleLink.href,
+              description: descEl ? descEl.innerText.trim() : '',
+              stars: starsEl ? starsEl.innerText.trim() : ''
+            });
+          }
+        });
+        if (results.length > 0) return results;
+      }
+
+      // 4. Standard HTML Tables (e.g. Invoices, Financials, Datasets)
+      const tables = document.querySelectorAll('table:not(.infobox)');
       for (const table of tables) {
         const rows = table.querySelectorAll('tr');
         if (rows.length > 1) {
@@ -115,81 +223,37 @@ class DOMExtractor {
         }
       }
 
-      // 2. Check for Hacker News style list (titleline)
-      const hnItems = document.querySelectorAll('.athing');
-      if (hnItems.length > 0) {
-        hnItems.forEach((row, idx) => {
-          if (idx >= 15) return;
-          const titleEl = row.querySelector('.titleline > a');
-          const siteEl = row.querySelector('.sitebit');
-          const subtext = row.nextElementSibling ? row.nextElementSibling.querySelector('.subtext') : null;
-          const scoreEl = subtext ? subtext.querySelector('.score') : null;
-          const authorEl = subtext ? subtext.querySelector('.hnuser') : null;
-
-          if (titleEl) {
-            results.push({
-              rank: idx + 1,
-              title: titleEl.innerText.trim(),
-              url: titleEl.href,
-              source: siteEl ? siteEl.innerText.trim() : 'news.ycombinator.com',
-              points: scoreEl ? scoreEl.innerText.trim() : '0 points',
-              author: authorEl ? authorEl.innerText.trim() : 'unknown'
-            });
-          }
-        });
-        if (results.length > 0) return results;
-      }
-
-      // 3. Check for GitHub trending or list rows
-      const repoRows = document.querySelectorAll('article.Box-row');
-      if (repoRows.length > 0) {
-        repoRows.forEach((row, idx) => {
-          if (idx >= 10) return;
-          const titleLink = row.querySelector('h2 a');
-          const descEl = row.querySelector('p');
-          const starsEl = row.querySelector('a[href*="/stargazers"]');
-          if (titleLink) {
-            results.push({
-              rank: idx + 1,
-              name: titleLink.innerText.trim().replace(/\s+/g, ' '),
-              url: titleLink.href,
-              description: descEl ? descEl.innerText.trim() : '',
-              stars: starsEl ? starsEl.innerText.trim() : ''
-            });
-          }
-        });
-        if (results.length > 0) return results;
-      }
-
-      // 4. Check for cards or list items (.card, .item, article, li)
-      const articles = document.querySelectorAll('article, .card, [role="article"]');
+      // 5. Cards, Articles, Search Results
+      const articles = document.querySelectorAll('article, .card, [role="article"], .g, .result');
       if (articles.length >= 2) {
         articles.forEach((art, idx) => {
           if (idx >= 15) return;
           const heading = art.querySelector('h1, h2, h3, h4');
           const link = art.querySelector('a');
-          const desc = art.querySelector('p');
+          const desc = art.querySelector('p, .snippet, .b_caption');
           if (heading) {
             results.push({
               id: idx + 1,
               title: heading.innerText.trim(),
               url: link ? link.href : '',
-              summary: desc ? desc.innerText.trim().slice(0, 150) : ''
+              summary: desc ? desc.innerText.trim().slice(0, 200) : ''
             });
           }
         });
         if (results.length > 0) return results;
       }
 
-      // 5. Fallback: extract main headings & paragraphs
+      // 6. Generic Heading + Paragraph extraction
       const headings = document.querySelectorAll('h1, h2, h3');
       headings.forEach((h, idx) => {
         if (idx >= 10) return;
         const nextP = h.nextElementSibling && h.nextElementSibling.tagName === 'P' ? h.nextElementSibling.innerText.trim() : '';
-        results.push({
-          section: h.innerText.trim(),
-          content: nextP.slice(0, 200)
-        });
+        if (h.innerText.trim()) {
+          results.push({
+            section: h.innerText.trim(),
+            content: nextP.slice(0, 300)
+          });
+        }
       });
 
       return results;
@@ -203,7 +267,6 @@ class DOMExtractor {
       const title = document.title || '';
       const url = window.location.href;
       
-      // Get main text content
       const clone = document.body ? document.body.cloneNode(true) : null;
       if (clone) {
         const scripts = clone.querySelectorAll('script, style, noscript, svg');

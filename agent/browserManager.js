@@ -1,3 +1,4 @@
+// agent/browserManager.js
 const puppeteer = require('puppeteer-core');
 const fs = require('fs');
 const path = require('path');
@@ -18,22 +19,19 @@ class BrowserManager {
   }
 
   async findChromePath() {
-    // 1. If on Vercel or AWS Lambda, use @sparticuz/chromium
     if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
       try {
         const chromium = require('@sparticuz/chromium');
         return await chromium.executablePath();
       } catch (e) {
-        console.warn('[BrowserManager] @sparticuz/chromium failed to load path:', e.message);
+        console.warn('[BrowserManager] @sparticuz/chromium failed:', e.message);
       }
     }
 
-    // 2. Check environment variable
     if (process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH)) {
       return process.env.CHROME_PATH;
     }
 
-    // 3. Check common local paths on Windows / Mac / Linux
     const commonPaths = [
       'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
       'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
@@ -46,12 +44,9 @@ class BrowserManager {
     ];
 
     for (const p of commonPaths) {
-      if (fs.existsSync(p)) {
-        return p;
-      }
+      if (fs.existsSync(p)) return p;
     }
 
-    // Fallback: Try sparticuz if installed
     try {
       const chromium = require('@sparticuz/chromium');
       return await chromium.executablePath();
@@ -61,7 +56,8 @@ class BrowserManager {
   }
 
   async launch(options = {}) {
-    if (this.browser && this.browser.isConnected()) {
+    // ✅ Fixed: use .connected property (isConnected() was removed in puppeteer v22+)
+    if (this.browser && this.browser.connected) {
       if (!this.page || this.page.isClosed()) {
         const pages = await this.browser.pages();
         this.page = pages.length > 0 ? pages[0] : await this.browser.newPage();
@@ -74,9 +70,10 @@ class BrowserManager {
 
     this.headless = options.headless !== undefined ? options.headless : true;
 
-    // Check if remote cloud browser is configured (e.g. Browserless.io or Browserbase)
-    const remoteWs = process.env.BROWSER_WS_ENDPOINT || 
-                     (process.env.BROWSERLESS_API_KEY ? `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_API_KEY}` : null);
+    const remoteWs = process.env.BROWSER_WS_ENDPOINT ||
+                     (process.env.BROWSERLESS_API_KEY
+                        ? `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_API_KEY}`
+                        : null);
 
     if (remoteWs) {
       console.log('[BrowserManager] Connecting to remote cloud browser...');
@@ -114,6 +111,15 @@ class BrowserManager {
       });
     }
 
+    // Reset state on unexpected disconnect
+    this.browser.once('disconnected', () => {
+      console.warn('[BrowserManager] Browser disconnected');
+      this.browser = null;
+      this.page = null;
+      this.cdpSession = null;
+      this.isScreencasting = false;
+    });
+
     const pages = await this.browser.pages();
     this.page = pages.length > 0 ? pages[0] : await this.browser.newPage();
     await this.page.setViewport(this.viewport);
@@ -143,7 +149,7 @@ class BrowserManager {
     });
 
     this.page.on('dialog', async (dialog) => {
-      console.log(`[Browser] Dialog detected: ${dialog.type()} - ${dialog.message()}`);
+      console.log(`[Browser] Dialog: ${dialog.type()} - ${dialog.message()}`);
       await dialog.accept().catch(() => {});
     });
   }
@@ -169,15 +175,13 @@ class BrowserManager {
       }
 
       this.cdpSession = await this.page.target().createCDPSession();
-      
+
       this.cdpSession.on('Page.screencastFrame', async ({ data, sessionId }) => {
         try {
           await this.cdpSession.send('Page.screencastFrameAck', { sessionId });
         } catch (e) {}
 
-        if (this.onFrameCallback) {
-          this.onFrameCallback(data);
-        }
+        if (this.onFrameCallback) this.onFrameCallback(data);
       });
 
       await this.cdpSession.send('Page.startScreencast', {
@@ -189,6 +193,7 @@ class BrowserManager {
       });
 
       this.isScreencasting = true;
+      console.log('[BrowserManager] CDP screencast started');
     } catch (err) {
       console.error('[BrowserManager] Screencast start error:', err.message);
     }
@@ -196,7 +201,9 @@ class BrowserManager {
 
   async setHeadlessMode(headless) {
     if (this.headless === headless && this.browser) return;
-    const previousUrl = this.currentUrl && this.currentUrl !== 'about:blank' ? this.currentUrl : 'https://news.ycombinator.com';
+    const previousUrl = this.currentUrl && this.currentUrl !== 'about:blank'
+      ? this.currentUrl
+      : 'https://news.ycombinator.com';
     await this.close();
     await this.launch({ headless });
     await this.navigateTo(previousUrl);
@@ -217,6 +224,10 @@ class BrowserManager {
         waitUntil: 'domcontentloaded',
         timeout: 30000
       });
+      // Give SPAs (Instagram, DeepSeek) a moment to hydrate their forms
+      await this.page.waitForSelector('input', { timeout: 8000 }).catch(() => {});
+      await new Promise(r => setTimeout(r, 800));
+
       this.currentUrl = this.page.url();
       this.currentTitle = await this.page.title().catch(() => '');
       this.isLoading = false;
@@ -238,20 +249,13 @@ class BrowserManager {
     this.notifyStateChange();
   }
 
-  async goBack() {
-    if (!this.page) return;
-    await this.page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {});
-  }
-
-  async goForward() {
-    if (!this.page) return;
-    await this.page.goForward({ waitUntil: 'domcontentloaded' }).catch(() => {});
-  }
+  async goBack()    { if (this.page) await this.page.goBack({ waitUntil: 'domcontentloaded' }).catch(() => {}); }
+  async goForward() { if (this.page) await this.page.goForward({ waitUntil: 'domcontentloaded' }).catch(() => {}); }
 
   async highlightElement(selector) {
     if (!this.page) return null;
     try {
-      const box = await this.page.evaluate((sel) => {
+      return await this.page.evaluate((sel) => {
         let el = null;
         if (sel.startsWith('//') || sel.startsWith('xpath/')) {
           const xpath = sel.replace(/^xpath\//, '');
@@ -263,30 +267,21 @@ class BrowserManager {
         if (!el) return null;
         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
         const rect = el.getBoundingClientRect();
-        
         const oldOutline = el.style.outline;
         const oldBoxShadow = el.style.boxShadow;
         el.style.outline = '3px solid #6366f1';
         el.style.boxShadow = '0 0 15px rgba(99, 102, 241, 0.6)';
         el.style.transition = 'all 0.2s ease-in-out';
-        
         setTimeout(() => {
-          try {
-            el.style.outline = oldOutline;
-            el.style.boxShadow = oldBoxShadow;
-          } catch(e) {}
+          try { el.style.outline = oldOutline; el.style.boxShadow = oldBoxShadow; } catch (e) {}
         }, 1500);
-
         return {
-          x: Math.round(rect.x),
-          y: Math.round(rect.y),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
+          x: Math.round(rect.x), y: Math.round(rect.y),
+          width: Math.round(rect.width), height: Math.round(rect.height),
           tag: el.tagName.toLowerCase(),
           text: (el.innerText || el.value || el.placeholder || '').slice(0, 50).trim()
         };
       }, selector);
-      return box;
     } catch (e) {
       return null;
     }
@@ -294,7 +289,7 @@ class BrowserManager {
 
   async click(selector, options = {}) {
     if (!this.page) await this.launch();
-    
+
     const box = await this.highlightElement(selector);
     await new Promise(r => setTimeout(r, 400));
 
@@ -311,10 +306,7 @@ class BrowserManager {
     } catch (err) {
       const evalSuccess = await this.page.evaluate((sel) => {
         const el = document.querySelector(sel);
-        if (el) {
-          el.click();
-          return true;
-        }
+        if (el) { el.click(); return true; }
         return false;
       }, selector).catch(() => false);
 
@@ -335,8 +327,15 @@ class BrowserManager {
       }, selector).catch(() => {});
     }
 
-    await this.page.type(selector, text, { delay: options.delay || 35 });
-    
+    try {
+      await this.page.click(selector, { clickCount: 3 }).catch(() => {});
+      await this.page.type(selector, text, { delay: options.delay || 35 });
+    } catch (_) {
+      // Focus manually then type
+      await this.page.focus(selector).catch(() => {});
+      await this.page.keyboard.type(text, { delay: options.delay || 35 });
+    }
+
     if (options.pressEnter) {
       await new Promise(r => setTimeout(r, 200));
       await this.page.keyboard.press('Enter');
@@ -352,25 +351,10 @@ class BrowserManager {
     await new Promise(r => setTimeout(r, 500));
   }
 
-  async mouseClickCoordinates(x, y) {
-    if (!this.page) return;
-    await this.page.mouse.click(x, y);
-  }
-
-  async keyPress(key) {
-    if (!this.page) return;
-    await this.page.keyboard.press(key);
-  }
-
-  async getPageText() {
-    if (!this.page) return '';
-    return await this.page.evaluate(() => document.body ? document.body.innerText : '');
-  }
-
-  async captureScreenshot() {
-    if (!this.page) return null;
-    return await this.page.screenshot({ type: 'jpeg', quality: 75, encoding: 'base64' });
-  }
+  async mouseClickCoordinates(x, y) { if (this.page) await this.page.mouse.click(x, y); }
+  async keyPress(key)               { if (this.page) await this.page.keyboard.press(key); }
+  async getPageText()               { return this.page ? await this.page.evaluate(() => document.body ? document.body.innerText : '') : ''; }
+  async captureScreenshot()         { return this.page ? await this.page.screenshot({ type: 'jpeg', quality: 75, encoding: 'base64' }) : null; }
 
   async close() {
     if (this.cdpSession) {

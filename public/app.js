@@ -1,4 +1,4 @@
-// DOAT Autonomous Browser Agent - Client Application
+// ENVOY Autonomous Browser Agent - Client Application
 document.addEventListener('DOMContentLoaded', () => {
   // DOM Elements
   const urlForm = document.getElementById('urlForm');
@@ -96,7 +96,7 @@ document.addEventListener('DOMContentLoaded', () => {
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
-        console.log('[WS] Connected to DOAT Agent Server');
+        console.log('[WS] Connected to ENVOY Agent Server');
         isUsingSSE = false;
       };
 

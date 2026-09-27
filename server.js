@@ -229,7 +229,7 @@ app.get('/api/data/export', (req, res) => {
 // Launch server & initial browser
 server.listen(PORT, async () => {
   console.log(`=======================================================`);
-  console.log(`🚀 DOAT Autonomous Browser Agent running on port ${PORT}`);
+  console.log(`🚀 ENVOY Autonomous Browser Agent running on port ${PORT}`);
   console.log(`🌐 Dashboard:  http://localhost:${PORT}`);
   console.log(`🏢 Demo App:   http://localhost:${PORT}/demo-app`);
   console.log(`=======================================================`);
